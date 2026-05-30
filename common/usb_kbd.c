@@ -531,12 +531,10 @@ static int usb_kbd_probe_dev(struct usb_device *dev, unsigned int ifnum)
 		return 0;
 	}
 #else
+	/* nonblock=true: wireless keyboards have no data when idle */
 	if (usb_int_msg(dev, data->intpipe, data->new, data->intpktsize,
-			data->intinterval, false) < 0) {
-		debug("USB KBD: no initial data from %04x:%04x (wireless), continuing\n",
-		      dev->descriptor.idVendor, dev->descriptor.idProduct);
+			data->intinterval, true) < 0)
 		memset(data->new, 0, USB_KBD_BOOT_REPORT_SIZE);
-	}
 #endif
 
 	/* Success. */
