@@ -52,6 +52,13 @@
  */
 
 #define CONFIG_EXTRA_ENV_SETTINGS \
+	"stdin=usbkbd,serial\0" \
+	"stdout=vidconsole,serial\0" \
+	"stderr=vidconsole,serial\0" \
+	"bootmenu_delay=15\0" \
+	"bootmenu_0=Boot eMMC Ubuntu=setenv bootdevnum 0; setenv bootdev mmc; run preboot_cont\0" \
+	"bootmenu_1=Boot SD Card=setenv bootdevnum 1; setenv bootdev mmc; run preboot_cont\0" \
+	"preboot_cont=env set first_try true; blkread dev ${bootdev} ${bootdevnum}; run select_ab; if test ${boot_reason} = fastboot; then run fastbootcmd; fi\0" \
 	"preboot="	COMMAND_PREBOOT "\0" \
 	"bootcmd="	COMMAND_BOOT "\0" \
 	"fastbootcmd="	COMMAND_FASTBOOT "\0" \
