@@ -439,7 +439,14 @@ static int event_ready(struct xhci_ctrl *ctrl)
  * @param expected	TRB type expected from Event TRB
  * @return pointer to event trb
  */
-union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
+static bool g_xhci_submit_only;
+static bool g_xhci_nonblock_pending;
+static struct usb_device *g_xhci_nonblock_dev;
+static int g_xhci_nonblock_ep;
+
+static union xhci_trb *xhci_wait_for_event_ms(struct xhci_ctrl *ctrl,
+					   trb_type expected,
+					   unsigned long timeout_ms)
 {
 	trb_type type;
 	unsigned long ts = get_timer(0);
@@ -462,7 +469,7 @@ union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
 			 */
 			BUG_ON(GET_COMP_CODE(
 				le32_to_cpu(event->generic.field[2])) !=
-								COMP_SUCCESS);
+										COMP_SUCCESS);
 		else
 			printf("Unexpected XHCI event TRB, skipping... "
 				"(%08x %08x %08x %08x)\n",
@@ -472,13 +479,20 @@ union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
 				le32_to_cpu(event->generic.field[3]));
 
 		xhci_acknowledge_event(ctrl);
-	} while (get_timer(ts) < XHCI_TIMEOUT);
+	} while (get_timer(ts) < timeout_ms);
 
 	if (expected == TRB_TRANSFER)
 		return NULL;
 
 	printf("XHCI timeout on event type %d... cannot recover.\n", expected);
 	BUG();
+}
+
+union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
+{
+	if (g_xhci_submit_only)
+		return xhci_wait_for_event_ms(ctrl, expected, 0);
+	return xhci_wait_for_event_ms(ctrl, expected, XHCI_TIMEOUT);
 }
 
 /*
@@ -550,6 +564,53 @@ static void record_transfer_result(struct usb_device *udev,
 }
 
 /**** Bulk and Control transfer methods ****/
+int xhci_int_tx_nonblock(struct usb_device *udev, unsigned long pipe,
+			 int length, void *buffer)
+{
+	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
+	int ep_index = usb_pipe_ep_index(pipe);
+	union xhci_trb *event;
+	trb_type type;
+	int ret;
+
+	if (g_xhci_nonblock_pending &&
+	    g_xhci_nonblock_dev == udev &&
+	    g_xhci_nonblock_ep == ep_index) {
+		if (!event_ready(ctrl))
+			return -1;
+
+		event = ctrl->event_ring->dequeue;
+		type = TRB_FIELD_TO_TYPE(le32_to_cpu(event->event_cmd.flags));
+		if (type != TRB_TRANSFER) {
+			xhci_acknowledge_event(ctrl);
+			return -1;
+		}
+
+		record_transfer_result(udev, event, length);
+		xhci_acknowledge_event(ctrl);
+		xhci_inval_cache((uintptr_t)buffer, length);
+		ret = (udev->status != USB_ST_NOT_PROC) ? 0 : -1;
+
+		/* Re-submit TRB immediately to keep XHCI polling keyboard */
+		g_xhci_submit_only = true;
+		xhci_bulk_tx(udev, pipe, length, buffer);
+		g_xhci_submit_only = false;
+		/* g_xhci_nonblock_pending stays true */
+
+		return ret;
+	}
+
+	/* No pending TRB — submit one without waiting */
+	g_xhci_submit_only = true;
+	ret = xhci_bulk_tx(udev, pipe, length, buffer);
+	g_xhci_submit_only = false;
+
+	g_xhci_nonblock_pending = true;
+	g_xhci_nonblock_dev = udev;
+	g_xhci_nonblock_ep = ep_index;
+	return -1;
+}
+
 /**
  * Queues up the BULK Request
  *
@@ -719,6 +780,8 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 again:
 	event = xhci_wait_for_event(ctrl, TRB_TRANSFER);
 	if (!event) {
+		if (g_xhci_submit_only)
+			return -ETIMEDOUT;
 		debug("XHCI bulk transfer timed out, aborting...\n");
 		abort_td(udev, ep_index);
 		udev->status = USB_ST_NAK_REC;  /* closest thing to a timeout */

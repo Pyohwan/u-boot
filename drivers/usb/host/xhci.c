@@ -1133,6 +1133,8 @@ static int _xhci_submit_int_msg(struct usb_device *udev, unsigned long pipe,
 	 * (at most) one TD. A TD (comprised of sg list entries) can
 	 * take several service intervals to transmit.
 	 */
+	if (nonblock)
+		return xhci_int_tx_nonblock(udev, pipe, length, buffer);
 	return xhci_bulk_tx(udev, pipe, length, buffer);
 }
 
