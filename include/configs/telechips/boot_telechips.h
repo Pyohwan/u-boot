@@ -12,7 +12,6 @@
 
 #define COMMAND_PREBOOT \
 	"usb start; " \
-	"setenv stdin usbkbd,serial; " \
 	"bootmenu ${bootmenu_delay}; " \
 	"env set first_try true; " \
 	"blkread dev ${bootdev} ${bootdevnum}; " \
