@@ -573,15 +573,23 @@ int xhci_int_tx_nonblock(struct usb_device *udev, unsigned long pipe,
 	trb_type type;
 	int ret;
 
+	printf("[KBD] enter pending=%d ep=%d deq=%p cyc=%d\n",
+	       g_xhci_nonblock_pending, ep_index,
+	       ctrl->event_ring->dequeue, ctrl->event_ring->cycle_state);
+
 	if (g_xhci_nonblock_pending &&
 	    g_xhci_nonblock_dev == udev &&
 	    g_xhci_nonblock_ep == ep_index) {
-		if (!event_ready(ctrl))
+		if (!event_ready(ctrl)) {
+			printf("[KBD] no-event\n");
 			return -1;
+		}
 
 		event = ctrl->event_ring->dequeue;
 		type = TRB_FIELD_TO_TYPE(le32_to_cpu(event->event_cmd.flags));
+		printf("[KBD] event type=%d\n", type);
 		if (type != TRB_TRANSFER) {
+			printf("[KBD] non-xfer event, ack\n");
 			xhci_acknowledge_event(ctrl);
 			return -1;
 		}
@@ -590,6 +598,10 @@ int xhci_int_tx_nonblock(struct usb_device *udev, unsigned long pipe,
 		xhci_acknowledge_event(ctrl);
 		xhci_inval_cache((uintptr_t)buffer, length);
 		ret = (udev->status != USB_ST_NOT_PROC) ? 0 : -1;
+		printf("[KBD] xfer ret=%d status=%lu data=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+		       ret, udev->status,
+		       ((u8*)buffer)[0], ((u8*)buffer)[1], ((u8*)buffer)[2], ((u8*)buffer)[3],
+		       ((u8*)buffer)[4], ((u8*)buffer)[5], ((u8*)buffer)[6], ((u8*)buffer)[7]);
 
 		/* Re-submit TRB immediately to keep XHCI polling keyboard */
 		g_xhci_submit_only = true;
@@ -601,9 +613,11 @@ int xhci_int_tx_nonblock(struct usb_device *udev, unsigned long pipe,
 	}
 
 	/* No pending TRB — submit one without waiting */
+	printf("[KBD] first submit\n");
 	g_xhci_submit_only = true;
 	ret = xhci_bulk_tx(udev, pipe, length, buffer);
 	g_xhci_submit_only = false;
+	printf("[KBD] first submit done ret=%d\n", ret);
 
 	g_xhci_nonblock_pending = true;
 	g_xhci_nonblock_dev = udev;

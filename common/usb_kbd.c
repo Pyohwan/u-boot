@@ -354,9 +354,14 @@ static inline void usb_kbd_poll_for_event(struct usb_device *dev)
 	struct usb_kbd_pdata *data = dev->privptr;
 
 	/* Submit an interrupt transfer request */
-	if (usb_int_msg(dev, data->intpipe, &data->new[0],
-			data->intpktsize, data->intinterval, true) >= 0)
-		usb_kbd_irq_worker(dev);
+	{
+		int _poll_r = usb_int_msg(dev, data->intpipe, &data->new[0],
+				data->intpktsize, data->intinterval, true);
+		printf("[KBD-POLL] int_msg ret=%d new[0]=%02x new[2]=%02x\n",
+		       _poll_r, data->new[0], data->new[2]);
+		if (_poll_r >= 0)
+			usb_kbd_irq_worker(dev);
+	}
 #elif defined(CONFIG_SYS_USB_EVENT_POLL_VIA_CONTROL_EP) || \
       defined(CONFIG_SYS_USB_EVENT_POLL_VIA_INT_QUEUE)
 #if defined(CONFIG_SYS_USB_EVENT_POLL_VIA_CONTROL_EP)
