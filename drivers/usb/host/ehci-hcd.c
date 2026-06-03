@@ -1543,42 +1543,77 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 				void *buffer, int length, int interval,
 				bool nonblock)
 {
+	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
 	void *backbuffer;
 	struct int_queue *queue;
 	unsigned long timeout;
-	int result = 0, ret;
+	int ret;
 
 	debug("dev=%p, pipe=%lu, buffer=%p, length=%d, interval=%d",
 	      dev, pipe, buffer, length, interval);
 
-	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, interval);
-	if (!queue)
-		return -1;
+	/*
+	 * Reuse a periodic queue cached from a previous poll of the same
+	 * endpoint instead of recreating it every call. A queue that is still
+	 * waiting for data (idle) is left untouched by _ehci_poll_int_queue, so
+	 * it can be polled again cheaply; only when the parameters differ do we
+	 * tear the stale one down.
+	 */
+	queue = ctrl->cached_intq;
+	if (queue && (ctrl->cached_intq_dev != dev ||
+		      ctrl->cached_intq_pipe != pipe ||
+		      ctrl->cached_intq_buffer != buffer ||
+		      ctrl->cached_intq_length != length)) {
+		_ehci_destroy_int_queue(dev, queue);
+		ctrl->cached_intq = queue = NULL;
+	}
+	if (!queue) {
+		queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer,
+					       interval);
+		if (!queue)
+			return -1;
+		ctrl->cached_intq = queue;
+		ctrl->cached_intq_dev = dev;
+		ctrl->cached_intq_pipe = pipe;
+		ctrl->cached_intq_buffer = buffer;
+		ctrl->cached_intq_length = length;
+	}
 
-	timeout = get_timer(0) + USB_TIMEOUT_MS(pipe);
+	/*
+	 * nonblock callers (usb_kbd) just want a quick "any data?" probe; the
+	 * cached queue keeps polling across calls, so do not spin here. Blocking
+	 * callers still wait the full interrupt timeout.
+	 */
+	timeout = get_timer(0) + (nonblock ? 0 : USB_TIMEOUT_MS(pipe));
 	while ((backbuffer = _ehci_poll_int_queue(dev, queue)) == NULL)
 		if (get_timer(0) > timeout) {
-			/* For nonblock pollers (e.g. usb_kbd on a wireless
-			 * keyboard) an idle timeout is expected, not an error;
-			 * stay quiet to avoid flooding the console. */
 			if (!nonblock)
 				printf("Timeout poll on interrupt endpoint\n");
-			result = -ETIMEDOUT;
-			break;
+			/* keep the queue cached for the next poll */
+			return -ETIMEDOUT;
 		}
 
 	if (backbuffer != buffer) {
 		debug("got wrong buffer back (%p instead of %p)\n",
 		      backbuffer, buffer);
+		_ehci_destroy_int_queue(dev, queue);
+		ctrl->cached_intq = NULL;
 		return -EINVAL;
 	}
 
+	/*
+	 * A report was consumed: _ehci_poll_int_queue marked the single-element
+	 * queue depleted, so tear it down and drop the cache. The next call
+	 * rearms a fresh queue. This bounds create/destroy to once per received
+	 * report rather than once per poll.
+	 */
 	ret = _ehci_destroy_int_queue(dev, queue);
+	ctrl->cached_intq = NULL;
 	if (ret < 0)
 		return ret;
 
 	/* everything worked out fine */
-	return result;
+	return 0;
 }
 
 static int _ehci_lock_async(struct ehci_ctrl *ctrl, int lock)
