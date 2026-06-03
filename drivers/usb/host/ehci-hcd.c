@@ -1558,7 +1558,11 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 	timeout = get_timer(0) + USB_TIMEOUT_MS(pipe);
 	while ((backbuffer = _ehci_poll_int_queue(dev, queue)) == NULL)
 		if (get_timer(0) > timeout) {
-			printf("Timeout poll on interrupt endpoint\n");
+			/* For nonblock pollers (e.g. usb_kbd on a wireless
+			 * keyboard) an idle timeout is expected, not an error;
+			 * stay quiet to avoid flooding the console. */
+			if (!nonblock)
+				printf("Timeout poll on interrupt endpoint\n");
 			result = -ETIMEDOUT;
 			break;
 		}
