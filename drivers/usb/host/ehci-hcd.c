@@ -208,6 +208,9 @@ out:
 	return ret;
 }
 
+/* Defined after struct int_queue; frees a queue cached for interrupt polling. */
+static void ehci_free_cached_intq(struct ehci_ctrl *ctrl);
+
 static int ehci_shutdown(struct ehci_ctrl *ctrl)
 {
 	int i, ret = 0;
@@ -215,29 +218,37 @@ static int ehci_shutdown(struct ehci_ctrl *ctrl)
 	int max_ports = HCS_N_PORTS(ehci_readl(&ctrl->hccr->cr_hcsparams));
 
 	cmd = ehci_readl(&ctrl->hcor->or_usbcmd);
-	/* If not run, directly return */
-	if (!(cmd & CMD_RUN))
-		return 0;
-	cmd &= ~(CMD_PSE | CMD_ASE);
-	ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
-	ret = handshake(&ctrl->hcor->or_usbsts, STS_ASS | STS_PSS, 0,
-		100 * 1000);
+	/* Stop the controller if it is running */
+	if (cmd & CMD_RUN) {
+		cmd &= ~(CMD_PSE | CMD_ASE);
+		ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
+		ret = handshake(&ctrl->hcor->or_usbsts, STS_ASS | STS_PSS, 0,
+			100 * 1000);
 
-	if (!ret) {
-		for (i = 0; i < max_ports; i++) {
-			reg = ehci_readl(&ctrl->hcor->or_portsc[i]);
-			reg |= EHCI_PS_SUSP;
-			ehci_writel(&ctrl->hcor->or_portsc[i], reg);
+		if (!ret) {
+			for (i = 0; i < max_ports; i++) {
+				reg = ehci_readl(&ctrl->hcor->or_portsc[i]);
+				reg |= EHCI_PS_SUSP;
+				ehci_writel(&ctrl->hcor->or_portsc[i], reg);
+			}
+
+			cmd &= ~CMD_RUN;
+			ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
+			ret = handshake(&ctrl->hcor->or_usbsts, STS_HALT,
+				STS_HALT, HCHALT_TIMEOUT);
 		}
 
-		cmd &= ~CMD_RUN;
-		ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
-		ret = handshake(&ctrl->hcor->or_usbsts, STS_HALT, STS_HALT,
-			HCHALT_TIMEOUT);
+		if (ret)
+			puts("EHCI failed to shut down host controller.\n");
 	}
 
-	if (ret)
-		puts("EHCI failed to shut down host controller.\n");
+	/*
+	 * Release a periodic int queue cached by _ehci_submit_int_msg, if any.
+	 * The controller is no longer running its periodic schedule, so the
+	 * queue allocations can be freed safely (the data buffer is owned by
+	 * the caller, not by us).
+	 */
+	ehci_free_cached_intq(ctrl);
 
 	return ret;
 }
@@ -1246,6 +1257,22 @@ struct int_queue {
 	struct QH *last;
 	struct qTD *tds;
 };
+
+/*
+ * Free a periodic int queue cached in ctrl->cached_intq (see
+ * _ehci_submit_int_msg). Only the allocations are released; the data buffer
+ * belongs to the caller. Call this when the controller is no longer running
+ * its periodic schedule, e.g. from ehci_shutdown().
+ */
+static void ehci_free_cached_intq(struct ehci_ctrl *ctrl)
+{
+	if (!ctrl->cached_intq)
+		return;
+	free(ctrl->cached_intq->tds);
+	free(ctrl->cached_intq->first);
+	free(ctrl->cached_intq);
+	ctrl->cached_intq = NULL;
+}
 
 #define NEXT_QH(qh) (struct QH *)((unsigned long)hc32_to_cpu((qh)->qh_link) & ~0x1f)
 
