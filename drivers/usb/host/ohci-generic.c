@@ -10,6 +10,7 @@
 #include <dm/device_compat.h>
 #include <dm/devres.h>
 #include <dm/ofnode.h>
+#include <dm/uclass.h>
 #include <generic-phy.h>
 #include <reset.h>
 #include "ohci.h"
@@ -77,11 +78,45 @@ static int ohci_shutdown_phy(struct udevice *dev)
 	return 0;
 }
 
+/*
+ * TCC8050 USB2.0 은 EHCI(HS)와 OHCI(FS/LS)가 하나의 PHY 를 공유하는 companion 구조다.
+ * PHY/VBUS/클럭은 EHCI(ehci-generic + TELECHIPS_EHCI_PHY)만 켜고, DT 의 OHCI 노드에는
+ * phys/clocks 가 없다. 그래서 OHCI 레지스터에 접근하기 전에, 같은 PHY 를 켜는 EHCI 형제
+ * 컨트롤러가 먼저 probe 되어 있어야 한다 (안 그러면 PHY 가 꺼진 채로 OHCI 레지스터를
+ * 만져서 Synchronous Abort). Linux 는 ehci_phy_set 전역 플래그 + deferred probe 로 이
+ * 순서를 보장하는데, U-Boot 에는 deferred probe 가 없으므로 여기서 EHCI 를 명시적으로
+ * 먼저 probe 시킨다.
+ */
+static int ohci_ensure_companion_ehci(struct udevice *dev)
+{
+	struct udevice *ehci;
+	ofnode node;
+	int ret;
+
+	node = ofnode_by_compatible(ofnode_null(), "telechips,tcc-ehci");
+	if (!ofnode_valid(node))
+		return 0;	/* EHCI 가 없으면 일반 OHCI 로 진행 */
+
+	ret = uclass_get_device_by_ofnode(UCLASS_USB, node, &ehci);
+	if (ret) {
+		dev_err(dev, "companion EHCI probe failed: %d (USB2.0 PHY not ready)\n",
+			ret);
+		return ret;
+	}
+
+	dev_dbg(dev, "companion EHCI ready, USB2.0 PHY powered\n");
+	return 0;
+}
+
 static int ohci_usb_probe(struct udevice *dev)
 {
 	struct ohci_regs *regs = dev_read_addr_ptr(dev);
 	struct generic_ohci *priv = dev_get_priv(dev);
 	int i, err, ret, clock_nb, reset_nb;
+
+	err = ohci_ensure_companion_ehci(dev);
+	if (err)
+		return err;
 
 	err = 0;
 	priv->clock_count = 0;

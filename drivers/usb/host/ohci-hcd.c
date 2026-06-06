@@ -110,11 +110,11 @@ static struct pci_device_id ehci_pci_ids[] = {
 
 /* We really should do proper cache flushing everywhere */
 #define flush_dcache_buffer(addr, size) \
-	flush_dcache_range((unsigned long)(addr), \
-		ALIGN((unsigned long)(addr) + size, ARCH_DMA_MINALIGN))
+	do { if (addr) flush_dcache_range((unsigned long)(addr), \
+		ALIGN((unsigned long)(addr) + size, ARCH_DMA_MINALIGN)); } while (0)
 #define invalidate_dcache_buffer(addr, size) \
-	invalidate_dcache_range((unsigned long)(addr), \
-		ALIGN((unsigned long)(addr) + size, ARCH_DMA_MINALIGN))
+	do { if (addr) invalidate_dcache_range((unsigned long)(addr), \
+		ALIGN((unsigned long)(addr) + size, ARCH_DMA_MINALIGN)); } while (0)
 
 /* Do not use sizeof(ed / td) as our ed / td structs contain extra members */
 #define flush_dcache_ed(addr) flush_dcache_buffer(addr, 16)
@@ -962,6 +962,7 @@ static void td_submit_job(ohci_t *ohci, struct usb_device *dev,
 	int cnt = 0;
 	__u32 info = 0;
 	unsigned int toggle = 0;
+
 
 	flush_dcache_buffer(buffer, data_len);
 

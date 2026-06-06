@@ -310,9 +310,13 @@ config USB_OHCI_PCI
 	help
 	  Enables support for the PCI-based OHCI controller.
 
+config USB_OHCI_NEW
+	bool
+
 config USB_OHCI_GENERIC
 	bool "Support for generic OHCI USB controller"
 	default ARCH_SUNXI
+	select USB_OHCI_NEW
 	---help---
 	  Enables support for generic OHCI controller.
 
