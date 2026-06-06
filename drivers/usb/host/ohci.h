@@ -381,6 +381,8 @@ typedef struct ohci_device {
  */
 
 
+struct int_queue;
+
 typedef struct ohci {
 	/* this allocates EDs for all possible endpoints */
 	struct ohci_device ohci_dev __aligned(TD_ALIGNMENT);
@@ -405,6 +407,13 @@ typedef struct ohci {
 	struct virt_root_hub rh;
 
 	const char	*slot_name;
+
+	/* periodic int queue cached for interrupt polling (see _ohci_submit_int_msg) */
+	struct int_queue *cached_intq;
+	struct usb_device *cached_intq_dev;
+	unsigned long cached_intq_pipe;
+	void *cached_intq_buffer;
+	int cached_intq_length;
 } ohci_t;
 
 #if CONFIG_IS_ENABLED(DM_USB)

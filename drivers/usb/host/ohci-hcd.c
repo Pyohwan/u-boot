@@ -1696,6 +1696,71 @@ static int _ohci_destroy_int_queue(ohci_t *ohci, struct usb_device *dev,
 	return 0;
 }
 
+/*
+ * Interrupt transfer with a cached periodic queue, mirroring the EHCI driver.
+ * usb_kbd polls the same endpoint repeatedly with nonblock=true; recreating an
+ * OHCI int queue (submit + wait) on every poll made key response sluggish (~1s)
+ * because submit_common_msg blocks for the interrupt timeout when no data is
+ * pending. Instead keep the queue across calls: an idle queue is polled cheaply
+ * by _ohci_poll_int_queue, and we only tear it down once a report is actually
+ * consumed (the single-element queue is then depleted).
+ */
+static int _ohci_submit_int_msg(ohci_t *ohci, struct usb_device *dev,
+				unsigned long pipe, void *buffer, int length,
+				int interval, bool nonblock)
+{
+	struct int_queue *queue = ohci->cached_intq;
+	void *backbuffer;
+	unsigned long timeout;
+	int ret;
+
+	if (queue && (ohci->cached_intq_dev != dev ||
+		      ohci->cached_intq_pipe != pipe ||
+		      ohci->cached_intq_buffer != buffer ||
+		      ohci->cached_intq_length != length)) {
+		_ohci_destroy_int_queue(ohci, dev, queue);
+		ohci->cached_intq = queue = NULL;
+	}
+	if (!queue) {
+		queue = _ohci_create_int_queue(ohci, dev, pipe, 1, length,
+					       buffer, interval);
+		if (!queue)
+			return -1;
+		ohci->cached_intq = queue;
+		ohci->cached_intq_dev = dev;
+		ohci->cached_intq_pipe = pipe;
+		ohci->cached_intq_buffer = buffer;
+		ohci->cached_intq_length = length;
+	}
+
+	/*
+	 * nonblock callers (usb_kbd) just want a quick "any data?" probe; the
+	 * cached queue keeps polling across calls, so do not spin. Blocking
+	 * callers still wait the full interrupt timeout.
+	 */
+	timeout = get_timer(0) + (nonblock ? 0 : USB_TIMEOUT_MS(pipe));
+	while ((backbuffer = _ohci_poll_int_queue(ohci, dev, queue)) == NULL)
+		if (get_timer(0) > timeout)
+			/* keep the queue cached for the next poll */
+			return -ETIMEDOUT;
+
+	if (backbuffer != buffer) {
+		_ohci_destroy_int_queue(ohci, dev, queue);
+		ohci->cached_intq = NULL;
+		return -EINVAL;
+	}
+
+	invalidate_dcache_buffer(buffer, length);
+
+	/* report consumed: single-element queue depleted, drop the cache */
+	ret = _ohci_destroy_int_queue(ohci, dev, queue);
+	ohci->cached_intq = NULL;
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
 #if !CONFIG_IS_ENABLED(DM_USB)
 /* submit routines called from usb.c */
 int submit_bulk_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
@@ -2163,8 +2228,8 @@ static int ohci_submit_int_msg(struct udevice *dev, struct usb_device *udev,
 {
 	ohci_t *ohci = dev_get_priv(usb_get_bus(dev));
 
-	return submit_common_msg(ohci, udev, pipe, buffer, length,
-				 NULL, interval);
+	return _ohci_submit_int_msg(ohci, udev, pipe, buffer, length,
+				    interval, nonblock);
 }
 
 static struct int_queue *ohci_create_int_queue(struct udevice *dev,
@@ -2223,6 +2288,12 @@ int ohci_register(struct udevice *dev, struct ohci_regs *regs)
 int ohci_deregister(struct udevice *dev)
 {
 	ohci_t *ohci = dev_get_priv(dev);
+
+	if (ohci->cached_intq) {
+		_ohci_destroy_int_queue(ohci, ohci->cached_intq_dev,
+					ohci->cached_intq);
+		ohci->cached_intq = NULL;
+	}
 
 	if (hc_reset(ohci) < 0)
 		return -EIO;
