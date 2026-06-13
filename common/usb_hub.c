@@ -707,13 +707,12 @@ static int usb_hub_configure(struct usb_device *dev)
 		debug("Single TT\n");
 		break;
 	case USB_HUB_PR_HS_MULTI_TT:
-		ret = usb_set_interface(dev, 0, 1);
-		if (ret == 0) {
-			debug("TT per port\n");
-			hub->tt.multi = true;
-		} else {
-			debug("Using single TT (err %d)\n", ret);
-		}
+		/* WORKAROUND: U-Boot EHCI multi-TT split-transaction scheduling
+		 * is unreliable on this controller; keep multi-TT hubs in their
+		 * default single-TT mode (interface altsetting 0) so FS/LS
+		 * devices behind them enumerate and transfer. SET_INTERFACE to
+		 * alt 1 (multi-TT) intentionally skipped; hub->tt.multi stays 0. */
+		debug("Multi-TT hub kept in single-TT mode (workaround)\n");
 		break;
 	case USB_HUB_PR_SS:
 		/* USB 3.0 hubs don't have a TT */

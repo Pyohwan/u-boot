@@ -632,6 +632,9 @@ static int xhci_set_configuration(struct usb_device *udev)
  * @param udev pointer to the Device Data Structure
  * @return 0 if successful else error code on failure
  */
+/* Address Device command attempts for devices that NAK the first try */
+#define ADDR_DEV_TRIES	4
+
 static int xhci_address_device(struct usb_device *udev, int root_portnr)
 {
 	int ret = 0;
@@ -641,25 +644,51 @@ static int xhci_address_device(struct usb_device *udev, int root_portnr)
 	struct xhci_virt_device *virt_dev;
 	int slot_id = udev->slot_id;
 	union xhci_trb *event;
+	int tries, comp_code;
 
 	virt_dev = ctrl->devs[slot_id];
 
 	/*
-	 * This is the first Set Address since device plug-in
-	 * so setting up the slot context.
+	 * Some full-speed devices (e.g. certain 2.4GHz wireless keyboard
+	 * dongles) do not answer the very first Address Device command and
+	 * return a USB Transaction Error. Linux recovers by retrying; do a few
+	 * command retries here before giving up.
 	 */
-	debug("Setting up addressable devices %p\n", ctrl->dcbaa);
-	xhci_setup_addressable_virt_dev(ctrl, udev, root_portnr);
+	for (tries = 0; ; tries++) {
+		/*
+		 * This is the first Set Address since device plug-in
+		 * so setting up the slot context.
+		 */
+		debug("Setting up addressable devices %p\n", ctrl->dcbaa);
+		xhci_setup_addressable_virt_dev(ctrl, udev, root_portnr);
 
-	ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
-	ctrl_ctx->add_flags = cpu_to_le32(SLOT_FLAG | EP0_FLAG);
-	ctrl_ctx->drop_flags = 0;
+		ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
+		ctrl_ctx->add_flags = cpu_to_le32(SLOT_FLAG | EP0_FLAG);
+		ctrl_ctx->drop_flags = 0;
 
-	xhci_queue_command(ctrl, (void *)ctrl_ctx, slot_id, 0, TRB_ADDR_DEV);
-	event = xhci_wait_for_event(ctrl, TRB_COMPLETION);
-	BUG_ON(TRB_TO_SLOT_ID(le32_to_cpu(event->event_cmd.flags)) != slot_id);
+		xhci_queue_command(ctrl, (void *)ctrl_ctx, slot_id, 0,
+				   TRB_ADDR_DEV);
+		event = xhci_wait_for_event(ctrl, TRB_COMPLETION);
+		BUG_ON(TRB_TO_SLOT_ID(le32_to_cpu(event->event_cmd.flags)) !=
+		       slot_id);
 
-	switch (GET_COMP_CODE(le32_to_cpu(event->event_cmd.status))) {
+		comp_code = GET_COMP_CODE(le32_to_cpu(event->event_cmd.status));
+		xhci_acknowledge_event(ctrl);
+
+		if (comp_code == COMP_TX_ERR && tries < ADDR_DEV_TRIES - 1) {
+			printf("Address Device: TX error, retry %d/%d\n",
+			       tries + 1, ADDR_DEV_TRIES);
+			/* Linux waits 200ms between SET_ADDRESS retries; some
+			 * dongles need that long to become responsive. */
+			mdelay(200);
+			continue;
+		}
+		if (comp_code == COMP_SUCCESS && tries > 0)
+			printf("Address Device: succeeded on retry %d\n", tries);
+		break;
+	}
+
+	switch (comp_code) {
 	case COMP_CTX_STATE:
 	case COMP_EBADSLT:
 		printf("Setup ERROR: address device command for slot %d.\n",
@@ -681,12 +710,10 @@ static int xhci_address_device(struct usb_device *udev, int root_portnr)
 		break;
 	default:
 		printf("ERROR: unexpected command completion code 0x%x.\n",
-			GET_COMP_CODE(le32_to_cpu(event->event_cmd.status)));
+			comp_code);
 		ret = -EINVAL;
 		break;
 	}
-
-	xhci_acknowledge_event(ctrl);
 
 	if (ret < 0)
 		/*
@@ -1133,6 +1160,8 @@ static int _xhci_submit_int_msg(struct usb_device *udev, unsigned long pipe,
 	 * (at most) one TD. A TD (comprised of sg list entries) can
 	 * take several service intervals to transmit.
 	 */
+	if (nonblock)
+		return xhci_int_tx_nonblock(udev, pipe, length, buffer);
 	return xhci_bulk_tx(udev, pipe, length, buffer);
 }
 

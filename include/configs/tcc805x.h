@@ -68,4 +68,8 @@
 #include "telechips/config_fallbacks.h"
 #include "telechips/display.h"
 
+
+/* TCC8050 USB2.0 OHCI (EHCI companion) root hub ports */
+#define CONFIG_SYS_USB_OHCI_MAX_ROOT_PORTS	3
+
 #endif	/* TCC805X_CONFIG_H */

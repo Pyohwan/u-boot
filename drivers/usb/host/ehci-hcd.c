@@ -208,6 +208,9 @@ out:
 	return ret;
 }
 
+/* Defined after struct int_queue; frees a queue cached for interrupt polling. */
+static void ehci_free_cached_intq(struct ehci_ctrl *ctrl);
+
 static int ehci_shutdown(struct ehci_ctrl *ctrl)
 {
 	int i, ret = 0;
@@ -215,29 +218,37 @@ static int ehci_shutdown(struct ehci_ctrl *ctrl)
 	int max_ports = HCS_N_PORTS(ehci_readl(&ctrl->hccr->cr_hcsparams));
 
 	cmd = ehci_readl(&ctrl->hcor->or_usbcmd);
-	/* If not run, directly return */
-	if (!(cmd & CMD_RUN))
-		return 0;
-	cmd &= ~(CMD_PSE | CMD_ASE);
-	ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
-	ret = handshake(&ctrl->hcor->or_usbsts, STS_ASS | STS_PSS, 0,
-		100 * 1000);
+	/* Stop the controller if it is running */
+	if (cmd & CMD_RUN) {
+		cmd &= ~(CMD_PSE | CMD_ASE);
+		ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
+		ret = handshake(&ctrl->hcor->or_usbsts, STS_ASS | STS_PSS, 0,
+			100 * 1000);
 
-	if (!ret) {
-		for (i = 0; i < max_ports; i++) {
-			reg = ehci_readl(&ctrl->hcor->or_portsc[i]);
-			reg |= EHCI_PS_SUSP;
-			ehci_writel(&ctrl->hcor->or_portsc[i], reg);
+		if (!ret) {
+			for (i = 0; i < max_ports; i++) {
+				reg = ehci_readl(&ctrl->hcor->or_portsc[i]);
+				reg |= EHCI_PS_SUSP;
+				ehci_writel(&ctrl->hcor->or_portsc[i], reg);
+			}
+
+			cmd &= ~CMD_RUN;
+			ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
+			ret = handshake(&ctrl->hcor->or_usbsts, STS_HALT,
+				STS_HALT, HCHALT_TIMEOUT);
 		}
 
-		cmd &= ~CMD_RUN;
-		ehci_writel(&ctrl->hcor->or_usbcmd, cmd);
-		ret = handshake(&ctrl->hcor->or_usbsts, STS_HALT, STS_HALT,
-			HCHALT_TIMEOUT);
+		if (ret)
+			puts("EHCI failed to shut down host controller.\n");
 	}
 
-	if (ret)
-		puts("EHCI failed to shut down host controller.\n");
+	/*
+	 * Release a periodic int queue cached by _ehci_submit_int_msg, if any.
+	 * The controller is no longer running its periodic schedule, so the
+	 * queue allocations can be freed safely (the data buffer is owned by
+	 * the caller, not by us).
+	 */
+	ehci_free_cached_intq(ctrl);
 
 	return ret;
 }
@@ -1247,6 +1258,22 @@ struct int_queue {
 	struct qTD *tds;
 };
 
+/*
+ * Free a periodic int queue cached in ctrl->cached_intq (see
+ * _ehci_submit_int_msg). Only the allocations are released; the data buffer
+ * belongs to the caller. Call this when the controller is no longer running
+ * its periodic schedule, e.g. from ehci_shutdown().
+ */
+static void ehci_free_cached_intq(struct ehci_ctrl *ctrl)
+{
+	if (!ctrl->cached_intq)
+		return;
+	free(ctrl->cached_intq->tds);
+	free(ctrl->cached_intq->first);
+	free(ctrl->cached_intq);
+	ctrl->cached_intq = NULL;
+}
+
 #define NEXT_QH(qh) (struct QH *)((unsigned long)hc32_to_cpu((qh)->qh_link) & ~0x1f)
 
 static int
@@ -1543,38 +1570,77 @@ static int _ehci_submit_int_msg(struct usb_device *dev, unsigned long pipe,
 				void *buffer, int length, int interval,
 				bool nonblock)
 {
+	struct ehci_ctrl *ctrl = ehci_get_ctrl(dev);
 	void *backbuffer;
 	struct int_queue *queue;
 	unsigned long timeout;
-	int result = 0, ret;
+	int ret;
 
 	debug("dev=%p, pipe=%lu, buffer=%p, length=%d, interval=%d",
 	      dev, pipe, buffer, length, interval);
 
-	queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer, interval);
-	if (!queue)
-		return -1;
+	/*
+	 * Reuse a periodic queue cached from a previous poll of the same
+	 * endpoint instead of recreating it every call. A queue that is still
+	 * waiting for data (idle) is left untouched by _ehci_poll_int_queue, so
+	 * it can be polled again cheaply; only when the parameters differ do we
+	 * tear the stale one down.
+	 */
+	queue = ctrl->cached_intq;
+	if (queue && (ctrl->cached_intq_dev != dev ||
+		      ctrl->cached_intq_pipe != pipe ||
+		      ctrl->cached_intq_buffer != buffer ||
+		      ctrl->cached_intq_length != length)) {
+		_ehci_destroy_int_queue(dev, queue);
+		ctrl->cached_intq = queue = NULL;
+	}
+	if (!queue) {
+		queue = _ehci_create_int_queue(dev, pipe, 1, length, buffer,
+					       interval);
+		if (!queue)
+			return -1;
+		ctrl->cached_intq = queue;
+		ctrl->cached_intq_dev = dev;
+		ctrl->cached_intq_pipe = pipe;
+		ctrl->cached_intq_buffer = buffer;
+		ctrl->cached_intq_length = length;
+	}
 
-	timeout = get_timer(0) + USB_TIMEOUT_MS(pipe);
+	/*
+	 * nonblock callers (usb_kbd) just want a quick "any data?" probe; the
+	 * cached queue keeps polling across calls, so do not spin here. Blocking
+	 * callers still wait the full interrupt timeout.
+	 */
+	timeout = get_timer(0) + (nonblock ? 0 : USB_TIMEOUT_MS(pipe));
 	while ((backbuffer = _ehci_poll_int_queue(dev, queue)) == NULL)
 		if (get_timer(0) > timeout) {
-			printf("Timeout poll on interrupt endpoint\n");
-			result = -ETIMEDOUT;
-			break;
+			if (!nonblock)
+				printf("Timeout poll on interrupt endpoint\n");
+			/* keep the queue cached for the next poll */
+			return -ETIMEDOUT;
 		}
 
 	if (backbuffer != buffer) {
 		debug("got wrong buffer back (%p instead of %p)\n",
 		      backbuffer, buffer);
+		_ehci_destroy_int_queue(dev, queue);
+		ctrl->cached_intq = NULL;
 		return -EINVAL;
 	}
 
+	/*
+	 * A report was consumed: _ehci_poll_int_queue marked the single-element
+	 * queue depleted, so tear it down and drop the cache. The next call
+	 * rearms a fresh queue. This bounds create/destroy to once per received
+	 * report rather than once per poll.
+	 */
 	ret = _ehci_destroy_int_queue(dev, queue);
+	ctrl->cached_intq = NULL;
 	if (ret < 0)
 		return ret;
 
 	/* everything worked out fine */
-	return result;
+	return 0;
 }
 
 static int _ehci_lock_async(struct ehci_ctrl *ctrl, int lock)

@@ -10,6 +10,7 @@
 #include <dm/device_compat.h>
 #include <dm/devres.h>
 #include <dm/ofnode.h>
+#include <dm/uclass.h>
 #include <generic-phy.h>
 #include <reset.h>
 #include "ohci.h"
@@ -77,11 +78,46 @@ static int ohci_shutdown_phy(struct udevice *dev)
 	return 0;
 }
 
+/*
+ * On TCC8050 the USB2.0 port shares one PHY between EHCI (HS) and OHCI
+ * (FS/LS) in a companion layout. Only EHCI (ehci-generic +
+ * TELECHIPS_EHCI_PHY) powers the PHY/VBUS/clock; the OHCI node in DT has
+ * no phys/clocks. So before touching any OHCI register, the sibling EHCI
+ * controller that powers the same PHY must already be probed -- otherwise
+ * we touch OHCI registers with the PHY off and take a Synchronous Abort.
+ * Linux guarantees this order via the ehci_phy_set global flag + deferred
+ * probe; U-Boot has no deferred probe, so we probe EHCI explicitly here.
+ */
+static int ohci_ensure_companion_ehci(struct udevice *dev)
+{
+	struct udevice *ehci;
+	ofnode node;
+	int ret;
+
+	node = ofnode_by_compatible(ofnode_null(), "telechips,tcc-ehci");
+	if (!ofnode_valid(node))
+		return 0;	/* no EHCI sibling -> proceed as plain OHCI */
+
+	ret = uclass_get_device_by_ofnode(UCLASS_USB, node, &ehci);
+	if (ret) {
+		dev_err(dev, "companion EHCI probe failed: %d (USB2.0 PHY not ready)\n",
+			ret);
+		return ret;
+	}
+
+	dev_dbg(dev, "companion EHCI ready, USB2.0 PHY powered\n");
+	return 0;
+}
+
 static int ohci_usb_probe(struct udevice *dev)
 {
 	struct ohci_regs *regs = dev_read_addr_ptr(dev);
 	struct generic_ohci *priv = dev_get_priv(dev);
 	int i, err, ret, clock_nb, reset_nb;
+
+	err = ohci_ensure_companion_ehci(dev);
+	if (err)
+		return err;
 
 	err = 0;
 	priv->clock_count = 0;

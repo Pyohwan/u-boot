@@ -259,6 +259,18 @@ struct ehci_ctrl {
 	bool async_locked;
 	struct ehci_ops ops;
 	void *priv;	/* client's private data */
+	/*
+	 * Cached periodic interrupt queue for repeated polls on the same
+	 * endpoint (e.g. usb_kbd polling a keyboard). Recreating the queue on
+	 * every poll adds per-call latency and, for in-flight queues, leaks or
+	 * corrupts the periodic schedule. The queue is kept while idle and torn
+	 * down only once a report has been consumed (see _ehci_submit_int_msg).
+	 */
+	struct int_queue *cached_intq;
+	struct usb_device *cached_intq_dev;
+	unsigned long cached_intq_pipe;
+	void *cached_intq_buffer;
+	int cached_intq_length;
 };
 
 /**

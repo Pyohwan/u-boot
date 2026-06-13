@@ -1247,6 +1247,8 @@ void xhci_queue_command(struct xhci_ctrl *ctrl, u8 *ptr,
 			u32 slot_id, u32 ep_index, trb_type cmd);
 void xhci_acknowledge_event(struct xhci_ctrl *ctrl);
 union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected);
+int xhci_int_tx_nonblock(struct usb_device *udev, unsigned long pipe,
+			 int length, void *buffer);
 int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 		 int length, void *buffer);
 int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,

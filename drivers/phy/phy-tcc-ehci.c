@@ -127,9 +127,9 @@ static int32_t tcc_ehci_usb_phy_init(struct phy *usb_phy)
 	uint32_t pcfg3 = 0x11;
 #else
 	uint32_t pcfg0 = 0x83000025U;
-	uint32_t pcfg3 = 0x0;
+	uint32_t pcfg3 = 0x11;
 #endif
-	uint32_t pcfg1 = 0xE31C2433U;
+	uint32_t pcfg1 = 0xE31C243AU;
 	uint32_t pcfg2 = 0x0;
 	uint32_t pcfg4 = 0x0;
 	uint32_t lcfg0 = 0x30048020;

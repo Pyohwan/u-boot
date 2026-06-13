@@ -11,6 +11,8 @@
  */
 
 #define COMMAND_PREBOOT \
+	"usb start; " \
+	"bootmenu ${bootmenu_delay}; " \
 	"env set first_try true; " \
 	"blkread dev ${bootdev} ${bootdevnum}; " \
 	"run select_ab; " \
